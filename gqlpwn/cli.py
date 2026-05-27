@@ -200,6 +200,200 @@ def introspect(
 
 
 # ---------------------------------------------------------------------------
+# autopwn command
+# ---------------------------------------------------------------------------
+
+@cli.command()
+@click.option("-u", "--url",       required=True,  help="Target GraphQL endpoint")
+@click.option("-t", "--token",     required=True,  help="Bearer token (IdToken for Cognito/AppSync)")
+@click.option("-H", "--header",    multiple=True,  help="Extra HTTP headers")
+@click.option("-x", "--proxy",     default=None,   help="HTTP proxy")
+@click.option("--timeout",         default=30,     type=int)
+@click.option("--workers",         default=5,      type=int)
+@click.option("--mutations",       is_flag=True,   help="Also enumerate mutations")
+@click.option("--aggressive",      is_flag=True,   help="Enable DoS module")
+@click.option("-o", "--output",    default="autopwn_report.html", help="Output report path")
+@click.option("-f", "--format",    default="html", type=click.Choice(["html", "json", "markdown"]))
+@click.option("-v", "--verbose",   is_flag=True)
+def autopwn(
+    url: str,
+    token: str,
+    header: tuple[str, ...],
+    proxy: str | None,
+    timeout: int,
+    workers: int,
+    mutations: bool,
+    aggressive: bool,
+    output: str,
+    format: str,
+    verbose: bool,
+) -> None:
+    """
+    Fully autonomous pentest: decode token, discover org/user context,
+    enumerate all accessible operations, test tenant isolation, run all
+    vuln modules — no manual input needed beyond URL + token.
+    """
+    _print_banner()
+    configure_logging(verbose)
+
+    import json as _json
+    from rich.rule import Rule
+
+    from gqlpwn.core.context_discoverer import ContextDiscoverer
+    from gqlpwn.core.enumerator import Enumerator
+    from gqlpwn.core.introspector import Introspector
+    from gqlpwn.core.parser import SchemaParser
+    from gqlpwn.core.requester import Requester
+    from gqlpwn.core.scanner import Scanner
+    from gqlpwn.core.scorer import assign_scores
+    from gqlpwn.modules.tenant_isolation import TenantIsolationModule
+    from gqlpwn.output.reporter import Reporter
+    from gqlpwn.utils.models import RunContext, ScanConfig, ScanResult
+
+    extra_headers = parse_headers(header)
+    config = ScanConfig(
+        url=url,
+        headers={"Authorization": token, **extra_headers},
+        proxy=proxy,
+        timeout=timeout,
+        concurrency=workers,
+        verbose=verbose,
+        aggressive=aggressive,
+    )
+
+    async def _run() -> None:
+        async with Requester(config) as req:
+
+            # ── Phase 1: Schema ──────────────────────────────────────────
+            console.print(Rule("[bold cyan]Phase 1 -- Schema Discovery[/]"))
+            with console.status("Pulling schema..."):
+                intro = Introspector(req)
+                intro_result = await intro.run()
+            schema = SchemaParser().parse(intro_result.raw)
+            console.print(
+                f"  Introspection : [bold]{'enabled' if intro_result.enabled else 'DISABLED'}[/]"
+            )
+            console.print(f"  Queries       : [bold]{len(schema.queries)}[/]")
+            console.print(f"  Mutations     : [bold]{len(schema.mutations)}[/]")
+            console.print(f"  Types         : [bold]{len(schema.types)}[/]")
+
+            # ── Phase 2: Context Discovery ───────────────────────────────
+            console.print(Rule("[bold cyan]Phase 2 -- Context Discovery[/]"))
+            with console.status("Decoding token + probing API for user/org context..."):
+                discoverer = ContextDiscoverer(req, token)
+                ctx_info = await discoverer.discover(schema)
+
+            console.print(ctx_info.summary())
+            if ctx_info.discovery_log:
+                for entry in ctx_info.discovery_log:
+                    console.print(f"  [dim]>> {entry}[/]")
+
+            # ── Phase 3: Enumeration ─────────────────────────────────────
+            console.print(Rule("[bold cyan]Phase 3 -- Operation Enumeration[/]"))
+            enumerator = Enumerator(req, org_id=ctx_info.org_id, concurrency=workers)
+            mut_list = schema.mutations if mutations else []
+
+            with console.status(
+                f"Firing {len(schema.queries)} queries"
+                + (f" + {len(mut_list)} mutations" if mutations else "") + "..."
+            ):
+                enum_report = await enumerator.run_all(schema.queries, mut_list, url)
+
+            console.print(f"  Accessible queries   : [green]{len(enum_report.accessible_queries)}[/]")
+            console.print(f"  Accessible mutations : [green]{len(enum_report.accessible_mutations)}[/]")
+            console.print(f"  Sensitive responses  : [red]{len(enum_report.sensitive_findings)}[/]")
+            console.print(f"  Auth-blocked         : [dim]{len(enum_report.auth_blocked)}[/]")
+
+            if enum_report.sensitive_findings:
+                console.print("\n  [bold red]Sensitive data detected in:[/]")
+                for r in enum_report.sensitive_findings:
+                    console.print(f"    [red]{r.field_name}[/] -- {', '.join(r.sensitive_matches)}")
+                    console.print(f"    [dim]{r.response_body[:200]}[/]\n")
+
+            # ── Phase 4: Tenant Isolation ────────────────────────────────
+            console.print(Rule("[bold cyan]Phase 4 -- Tenant Isolation (BOLA)[/]"))
+            result = ScanResult(target=url)
+            result.gql_schema = schema
+            result.introspection_enabled = intro_result.enabled
+            run_ctx = RunContext(config=config, result=result, requester=req)
+
+            if ctx_info.org_id:
+                console.print(f"  Own org_id: [cyan]{ctx_info.org_id}[/]")
+                with console.status("Testing cross-tenant access..."):
+                    iso_mod = TenantIsolationModule(own_org_id=ctx_info.org_id)
+                    iso_findings = await iso_mod.run(run_ctx)
+                if iso_findings:
+                    console.print(f"  [bold red]CRITICAL: {len(iso_findings)} tenant isolation failure(s)[/]")
+                    for f in iso_findings:
+                        console.print(f"    [red]{f.title}[/]")
+                else:
+                    console.print("  [green]No cross-tenant access confirmed[/]")
+                result.findings.extend(iso_findings)
+            else:
+                console.print("  [yellow]org_id not discovered -- skipping tenant isolation[/]")
+
+            # ── Phase 5: Vulnerability Scan ──────────────────────────────
+            console.print(Rule("[bold cyan]Phase 5 -- Vulnerability Modules[/]"))
+            vuln_config = config.model_copy(update={
+                "modules": ["info_disclosure", "injection", "bola", "auth", "ssrf"]
+                + (["dos"] if aggressive else []),
+                "aggressive": aggressive,
+            })
+            scanner = Scanner(vuln_config)
+            # Run modules only (skip re-introspection by reusing schema)
+            from gqlpwn.core.scanner import _resolve_modules
+            modules = _resolve_modules(vuln_config.modules, aggressive)
+            from gqlpwn.core.scorer import assign_scores as _score
+
+            module_findings = []
+            for mod in modules:
+                try:
+                    mf = await mod.run(run_ctx)
+                    module_findings.extend(mf)
+                    if mf:
+                        console.print(f"  [yellow]{mod.name}[/]: {len(mf)} finding(s)")
+                except Exception as exc:
+                    console.print(f"  [red]{mod.name} error: {exc}[/]")
+
+            result.findings.extend(module_findings)
+            result.findings = assign_scores(result.findings)
+            result.modules_run = [m.name for m in modules] + (
+                ["tenant_isolation"] if ctx_info.org_id else []
+            )
+
+            # ── Phase 6: Report ──────────────────────────────────────────
+            console.print(Rule("[bold cyan]Phase 6 -- Report[/]"))
+            reporter = Reporter(result)
+            reporter.write(output, format)  # type: ignore[arg-type]
+            console.print(f"  Report : [green]{output}[/]")
+
+            # Also dump enum results
+            enum_out = output.rsplit(".", 1)[0] + "_enum.json"
+            enum_data = {
+                "user_context": {
+                    "user_id": ctx_info.user_id,
+                    "email": ctx_info.email,
+                    "org_id": ctx_info.org_id,
+                    "role": ctx_info.role,
+                    "jwt_claims": ctx_info.raw_claims,
+                },
+                "accessible_queries": [
+                    {"field": r.field_name, "sensitive": bool(r.sensitive_matches),
+                     "patterns": r.sensitive_matches, "preview": r.response_body[:400]}
+                    for r in enum_report.accessible_queries
+                ],
+                "sensitive_fields": [r.field_name for r in enum_report.sensitive_findings],
+                "auth_blocked": enum_report.auth_blocked,
+                "total_findings": len(result.findings),
+            }
+            Path(enum_out).write_text(_json.dumps(enum_data, indent=2), encoding="utf-8")
+            console.print(f"  Enum   : [green]{enum_out}[/]")
+            console.print(f"\n  Total findings: [bold]{len(result.findings)}[/]")
+
+    asyncio.run(_run())
+
+
+# ---------------------------------------------------------------------------
 # enum command
 # ---------------------------------------------------------------------------
 
