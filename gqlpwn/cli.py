@@ -251,6 +251,7 @@ def autopwn(
     from gqlpwn.utils.models import RunContext, ScanConfig, ScanResult
 
     extra_headers = parse_headers(header)
+    token = "".join(token.split())  # strip all whitespace/newlines baked in from shell paste
     config = ScanConfig(
         url=url,
         headers={"Authorization": token, **extra_headers},
