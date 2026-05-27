@@ -1,0 +1,34 @@
+# gqlpwn default configuration
+# All values can be overridden via CLI flags
+
+http:
+  timeout: 30
+  concurrency: 10
+  max_retries: 3
+  rate_limit: 0.0          # seconds between requests (0 = unlimited)
+  follow_redirects: true
+  verify_ssl: false
+  user_agent: "gqlpwn/1.0 (GraphQL Security Scanner; +https://github.com/ahaan-parmar/gqlpwn)"
+
+scan:
+  max_depth: 3             # max object traversal depth for fuzzing
+  id_range: 10             # how many sequential IDs to probe in BOLA checks
+  default_modules:
+    - info_disclosure
+    - injection
+    - bola
+    - auth
+    - ssrf
+
+dos:
+  max_depth: 15            # nesting depth for DoS payloads
+  max_aliases: 100         # alias count for alias overloading
+  max_batch: 50            # operations in a single batch request
+  # These are conservative defaults. --aggressive raises them.
+
+output:
+  format: html             # json | markdown | html
+  include_info: true       # include informational findings in report
+
+logging:
+  level: info              # debug | info | warning | error

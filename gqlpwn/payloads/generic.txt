@@ -1,0 +1,132 @@
+# Generic wordlist for GraphQL field name discovery
+# Used when introspection is disabled
+
+# Auth / identity
+user
+users
+me
+viewer
+account
+profile
+currentUser
+whoami
+session
+token
+
+# CRUD patterns
+create
+read
+update
+delete
+list
+get
+search
+find
+fetch
+add
+remove
+set
+
+# Common entities
+post
+posts
+article
+articles
+comment
+comments
+product
+products
+order
+orders
+invoice
+customer
+customers
+vendor
+payment
+payments
+
+# Admin
+admin
+adminUser
+superUser
+root
+settings
+config
+configuration
+system
+audit
+
+# Auth operations
+login
+logout
+register
+signup
+authenticate
+refreshToken
+forgotPassword
+resetPassword
+verifyEmail
+verifyToken
+
+# File operations
+upload
+download
+file
+files
+image
+images
+media
+document
+documents
+
+# Communication
+message
+messages
+notification
+notifications
+email
+emails
+webhook
+webhooks
+
+# Organization
+team
+teams
+organization
+organizations
+project
+projects
+role
+roles
+permission
+permissions
+group
+groups
+
+# Analytics / reporting
+report
+reports
+analytics
+dashboard
+metrics
+stats
+logs
+audit
+events
+
+# Infrastructure
+health
+status
+version
+info
+ping
+debug
+
+# GraphQL conventions
+node
+nodes
+edge
+edges
+connection
+pageInfo
+relay

@@ -1,0 +1,33 @@
+{
+  "payloads": [
+    ";id",
+    "|id",
+    "$(id)",
+    "`id`",
+    ";whoami",
+    "|whoami",
+    "$(whoami)",
+    ";cat /etc/passwd",
+    "|cat /etc/passwd",
+    "$(cat /etc/passwd)",
+    ";sleep 3",
+    "|sleep 3",
+    "$(sleep 3)",
+    "& ping -c 3 127.0.0.1 &",
+    "\nid\n",
+    "\r\nwhoami\r\n"
+  ],
+  "error_signatures": [
+    "uid=",
+    "root:",
+    "daemon:",
+    "bin/bash",
+    "bin/sh",
+    "command not found",
+    "No such file",
+    "permission denied",
+    "PING 127.0.0.1",
+    "bytes from 127.0.0.1",
+    "/etc/passwd"
+  ]
+}

