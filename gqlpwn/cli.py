@@ -280,8 +280,21 @@ def autopwn(
 
             # ── Phase 2: Context Discovery ───────────────────────────────
             console.print(Rule("[bold cyan]Phase 2 -- Context Discovery[/]"))
-            with console.status("Decoding token + probing API for user/org context..."):
-                discoverer = ContextDiscoverer(req, token)
+            from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn
+            with Progress(
+                SpinnerColumn(),
+                TextColumn("[progress.description]{task.description}"),
+                BarColumn(),
+                MofNCompleteColumn(),
+                console=console,
+                transient=True,
+            ) as progress:
+                probe_task = progress.add_task("Probing queries for user/org context...", total=None)
+
+                def _on_probe(probed: int, total: int) -> None:
+                    progress.update(probe_task, completed=probed, total=total)
+
+                discoverer = ContextDiscoverer(req, token, on_probe=_on_probe)
                 ctx_info = await discoverer.discover(schema)
 
             console.print(ctx_info.summary())

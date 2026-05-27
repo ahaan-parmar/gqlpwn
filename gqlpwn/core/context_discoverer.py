@@ -10,7 +10,7 @@ import base64
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from gqlpwn.core.requester import RequestError, Requester
 from gqlpwn.utils.logger import get_logger
@@ -124,13 +124,31 @@ class ContextDiscoverer:
     organization they belong to, using JWT decoding + live API probing.
     """
 
-    def __init__(self, requester: Requester, token: str) -> None:
+    def __init__(
+        self,
+        requester: Requester,
+        token: str,
+        on_probe: Callable[[int, int], None] | None = None,
+    ) -> None:
         self.requester = requester
         self.token = token
         self.claims = _decode_jwt_payload(token)
+        self._on_probe = on_probe
+        self._probed = 0
+        self._total = 0
 
     async def discover(self, schema: GraphQLSchema) -> UserContext:
         ctx = UserContext()
+
+        # Pre-compute probe total so progress bar has a denominator
+        _self_fields = [
+            f for f in schema.queries
+            if f.name.lower() in {n.lower() for n in _SELF_QUERY_NAMES}
+            or not any(a.is_required for a in f.args)
+        ][:20]
+        _zero_arg = [f for f in schema.queries if not f.args][:30]
+        self._total = len(_self_fields) + len(_zero_arg)
+        self._probed = 0
 
         # Phase 1: extract what we can from the JWT itself
         self._extract_jwt_claims(ctx)
@@ -335,8 +353,11 @@ class ContextDiscoverer:
     async def _fire(self, query: str) -> str | None:
         try:
             resp = await self.requester.graphql(query)
-            if resp.status_code in (200, 400):
-                return resp.text
+            result = resp.text if resp.status_code in (200, 400) else None
         except (RequestError, Exception):
-            pass
-        return None
+            result = None
+        finally:
+            self._probed += 1
+            if self._on_probe:
+                self._on_probe(self._probed, self._total)
+        return result
