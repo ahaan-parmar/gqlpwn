@@ -23,12 +23,13 @@ console = Console()
 
 # Registry of all available modules (import lazily to avoid circular deps at load time)
 MODULE_REGISTRY: dict[str, str] = {
-    "info_disclosure": "gqlpwn.modules.info_disclosure.InfoDisclosureModule",
-    "injection":       "gqlpwn.modules.injection.InjectionModule",
-    "bola":            "gqlpwn.modules.bola.BolaModule",
-    "auth":            "gqlpwn.modules.auth.AuthModule",
-    "dos":             "gqlpwn.modules.dos.DosModule",
-    "ssrf":            "gqlpwn.modules.ssrf.SsrfModule",
+    "info_disclosure":   "gqlpwn.modules.info_disclosure.InfoDisclosureModule",
+    "injection":         "gqlpwn.modules.injection.InjectionModule",
+    "bola":              "gqlpwn.modules.bola.BolaModule",
+    "auth":              "gqlpwn.modules.auth.AuthModule",
+    "dos":               "gqlpwn.modules.dos.DosModule",
+    "ssrf":              "gqlpwn.modules.ssrf.SsrfModule",
+    "tenant_isolation":  "gqlpwn.modules.tenant_isolation.TenantIsolationModule",
 }
 
 

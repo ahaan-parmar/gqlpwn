@@ -200,6 +200,149 @@ def introspect(
 
 
 # ---------------------------------------------------------------------------
+# enum command
+# ---------------------------------------------------------------------------
+
+@cli.command()
+@click.option("-u", "--url",       required=True,  help="Target GraphQL endpoint")
+@click.option("-H", "--header",    multiple=True,  help="HTTP header (repeatable)")
+@click.option("-c", "--cookie",    default=None)
+@click.option("-x", "--proxy",     default=None)
+@click.option("-t", "--timeout",   default=30, type=int)
+@click.option("--org-id",          default=None,   help="Your organization_id (for tenant isolation testing)")
+@click.option("--mutations",       is_flag=True,   help="Also enumerate mutations (careful on prod)")
+@click.option("--workers",         default=5, type=int)
+@click.option("-o", "--output",    default=None,   help="Write JSON results to file")
+@click.option("-v", "--verbose",   is_flag=True)
+def enum(
+    url: str,
+    header: tuple[str, ...],
+    cookie: str | None,
+    proxy: str | None,
+    timeout: int,
+    org_id: str | None,
+    mutations: bool,
+    workers: int,
+    output: str | None,
+    verbose: bool,
+) -> None:
+    """
+    Deep enumeration: fire every query/mutation, map what returns data,
+    flag sensitive responses, and test tenant isolation via organization_id.
+    """
+    _print_banner()
+    configure_logging(verbose)
+
+    import json as _json
+    from gqlpwn.core.enumerator import Enumerator
+    from gqlpwn.core.introspector import Introspector
+    from gqlpwn.core.parser import SchemaParser
+    from gqlpwn.core.requester import Requester
+    from gqlpwn.utils.models import ScanConfig
+
+    config = ScanConfig(
+        url=url,
+        headers=parse_headers(header),
+        cookies=parse_cookies(cookie),
+        proxy=proxy,
+        timeout=timeout,
+        concurrency=workers,
+    )
+
+    async def _run() -> None:
+        async with Requester(config) as req:
+            # 1. Schema discovery
+            with console.status("[bold cyan]Pulling schema...[/]"):
+                intro = Introspector(req)
+                intro_result = await intro.run()
+
+            schema = SchemaParser().parse(intro_result.raw)
+            console.print(
+                f"Schema: [bold]{len(schema.queries)}[/] queries, "
+                f"[bold]{len(schema.mutations)}[/] mutations, "
+                f"[bold]{len(schema.types)}[/] types"
+            )
+
+            # 2. Enumerate
+            enumerator = Enumerator(req, org_id=org_id, concurrency=workers)
+            mut_list = schema.mutations if mutations else []
+
+            with console.status(f"[bold cyan]Enumerating {len(schema.queries)} queries"
+                                + (f" + {len(mut_list)} mutations" if mutations else "") + "...[/]"):
+                report = await enumerator.run_all(schema.queries, mut_list, url)
+
+            # 3. Print results
+            _print_enum_report(report, mutations)
+
+            # 4. Tenant isolation summary
+            if org_id:
+                console.print(f"\n[bold]Tenant isolation:[/] testing with org_id=[cyan]{org_id}[/]")
+                from gqlpwn.modules.tenant_isolation import TenantIsolationModule
+                from gqlpwn.utils.models import RunContext, ScanResult, ScanConfig as SC
+                result = ScanResult(target=url)
+                result.gql_schema = schema
+                ctx_obj = RunContext(config=config, result=result, requester=req)
+                mod = TenantIsolationModule(own_org_id=org_id)
+                findings = await mod.run(ctx_obj)
+                if findings:
+                    console.print(f"\n[bold red]TENANT ISOLATION FAILURES: {len(findings)}[/]")
+                    for f in findings:
+                        console.print(f"  [red]{f.severity.upper()}[/] {f.title}")
+                        console.print(f"  Evidence: {f.evidence[:200]}")
+                else:
+                    console.print("[green]No cross-tenant access confirmed[/]")
+
+            # 5. Write output
+            if output:
+                data = {
+                    "target": url,
+                    "accessible_queries": [
+                        {"field": r.field_name, "has_sensitive": bool(r.sensitive_matches),
+                         "sensitive_patterns": r.sensitive_matches,
+                         "response_preview": r.response_body[:300]}
+                        for r in report.accessible_queries
+                    ],
+                    "accessible_mutations": [
+                        {"field": r.field_name, "response_preview": r.response_body[:300]}
+                        for r in report.accessible_mutations
+                    ],
+                    "sensitive_findings": [
+                        {"field": r.field_name, "patterns": r.sensitive_matches,
+                         "response_preview": r.response_body[:400]}
+                        for r in report.sensitive_findings
+                    ],
+                    "auth_blocked": report.auth_blocked,
+                }
+                Path(output).write_text(_json.dumps(data, indent=2), encoding="utf-8")
+                console.print(f"\n[green]Results written to {output}[/]")
+
+    asyncio.run(_run())
+
+
+def _print_enum_report(report: object, show_mutations: bool) -> None:
+    from gqlpwn.core.enumerator import EnumReport
+    r: EnumReport = report  # type: ignore
+
+    console.print(f"\n[bold]Accessible queries ({len(r.accessible_queries)}/{r.total_queries}):[/]")
+    for res in r.accessible_queries:
+        flag = " [red][SENSITIVE][/]" if res.sensitive_matches else ""
+        console.print(f"  [green]{res.field_name}[/]{flag}")
+
+    if show_mutations and r.accessible_mutations:
+        console.print(f"\n[bold]Accessible mutations ({len(r.accessible_mutations)}/{r.total_mutations}):[/]")
+        for res in r.accessible_mutations:
+            console.print(f"  [yellow]{res.field_name}[/]")
+
+    if r.sensitive_findings:
+        console.print(f"\n[bold red]Sensitive data in {len(r.sensitive_findings)} responses:[/]")
+        for res in r.sensitive_findings:
+            console.print(f"  [red]{res.field_name}[/] -- matched: {', '.join(res.sensitive_matches)}")
+            console.print(f"    Preview: {res.response_body[:200]}")
+
+    console.print(f"\n[dim]Auth-blocked: {len(r.auth_blocked)} | GQL errors: {len(r.gql_errors)}[/]")
+
+
+# ---------------------------------------------------------------------------
 # list-modules command
 # ---------------------------------------------------------------------------
 
