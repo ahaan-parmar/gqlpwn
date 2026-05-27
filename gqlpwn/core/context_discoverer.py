@@ -57,7 +57,7 @@ class UserContext:
 
     def log(self, msg: str) -> None:
         self.discovery_log.append(msg)
-        logger.info("context_discovery", msg=msg)
+        logger.info("context_discovery", detail=msg)
 
     def summary(self) -> str:
         lines = [
