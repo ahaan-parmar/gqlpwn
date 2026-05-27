@@ -58,7 +58,7 @@ def cli() -> None:
 # ---------------------------------------------------------------------------
 
 @cli.command()
-@click.option("-u", "--url",          required=True,  help="Target GraphQL endpoint URL")
+@click.argument("url")
 @click.option("-H", "--header",       multiple=True,  help="HTTP header (repeatable): 'Authorization: Bearer TOKEN'")
 @click.option("-c", "--cookie",       default=None,   help="Cookie string: 'session=abc; csrf=xyz'")
 @click.option("-x", "--proxy",        default=None,   help="HTTP/HTTPS proxy URL: 'http://127.0.0.1:8080'")
@@ -138,7 +138,7 @@ def scan(
 # ---------------------------------------------------------------------------
 
 @cli.command()
-@click.option("-u", "--url",    required=True,  help="Target GraphQL endpoint")
+@click.argument("url")
 @click.option("-H", "--header", multiple=True,  help="HTTP header")
 @click.option("-x", "--proxy",  default=None)
 @click.option("-t", "--timeout",default=30, type=int)
@@ -204,7 +204,7 @@ def introspect(
 # ---------------------------------------------------------------------------
 
 @cli.command()
-@click.option("-u", "--url",       required=True,  help="Target GraphQL endpoint")
+@click.argument("url")
 @click.option("-t", "--token",     required=True,  help="Bearer token (IdToken for Cognito/AppSync)")
 @click.option("-H", "--header",    multiple=True,  help="Extra HTTP headers")
 @click.option("-x", "--proxy",     default=None,   help="HTTP proxy")
@@ -399,7 +399,7 @@ def autopwn(
 # ---------------------------------------------------------------------------
 
 @cli.command()
-@click.option("-u", "--url",       required=True,  help="Target GraphQL endpoint")
+@click.argument("url")
 @click.option("-H", "--header",    multiple=True,  help="HTTP header (repeatable)")
 @click.option("-c", "--cookie",    default=None)
 @click.option("-x", "--proxy",     default=None)
