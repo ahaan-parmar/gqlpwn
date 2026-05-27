@@ -93,11 +93,11 @@ class Scanner:
             result.introspection_enabled = intro_result.enabled
 
             if intro_result.method == "none":
-                console.print("[yellow]⚠ Schema discovery failed — limited testing possible[/]")
+                console.print("[yellow]! Schema discovery failed -- limited testing possible[/]")
             else:
                 console.print(
-                    f"[green]✓ Schema via [bold]{intro_result.method}[/bold]"
-                    f" — {len(result.gql_schema.queries)} queries, "
+                    f"[green]OK Schema via [bold]{intro_result.method}[/bold]"
+                    f" -- {len(result.gql_schema.queries)} queries, "
                     f"{len(result.gql_schema.mutations)} mutations[/]"
                 )
 

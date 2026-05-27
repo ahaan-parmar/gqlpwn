@@ -119,7 +119,7 @@ def scan(
     )
 
     if aggressive:
-        console.print("[bold yellow]⚠ Aggressive mode enabled — DoS-category modules are active.[/]")
+        console.print("[bold yellow]! Aggressive mode enabled -- DoS-category modules are active.[/]")
         console.print("[dim]  Only use against systems you own or have explicit written permission to test.[/]\n")
 
     result = asyncio.run(Scanner(scan_config).run())
