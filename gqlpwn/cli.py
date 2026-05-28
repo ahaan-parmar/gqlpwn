@@ -423,8 +423,8 @@ def autopwn(
 @cli.command()
 @click.argument("website_url")
 @click.option("--email",        required=True,  help="Account email — OTP will be sent here")
-@click.option("--auth-flow",    default="otp",  type=click.Choice(["otp", "password"]),
-              help="Auth flow: 'otp' (Cognito CUSTOM_AUTH) or 'password' (USER_PASSWORD_AUTH)")
+@click.option("--auth-flow",    default="auto", type=click.Choice(["auto", "otp", "password"]),
+              help="Auth flow: 'auto' tries OTP then password (default), 'otp' forces CUSTOM_AUTH, 'password' forces USER_PASSWORD_AUTH")
 @click.option("--endpoint",     default=None,   help="Override AppSync GraphQL endpoint (skip scraping)")
 @click.option("--pool-id",      default=None,   help="Override Cognito User Pool ID (skip scraping)")
 @click.option("--client-id",    default=None,   help="Override Cognito Client ID (skip scraping)")
@@ -463,6 +463,8 @@ def fullpwn(
 
     from rich.rule import Rule
     from gqlpwn.core.cognito_auth import (
+        AuthResult,
+        auto_auth,
         complete_otp_auth,
         initiate_otp_auth,
         password_auth,
@@ -493,31 +495,34 @@ def fullpwn(
     console.print(Rule("[bold cyan]Step 2 -- Cognito Authentication[/]"))
     id_token: str
 
-    if auth_flow == "otp":
-        console.print(f"  Triggering OTP to [bold]{email}[/]...")
-        try:
+    def _prompt(msg: str) -> str:
+        hide = "password" in msg.lower() or "otp" not in msg.lower()
+        return click.prompt(f"  {msg}", hide_input=hide)
+
+    try:
+        if auth_flow == "auto":
+            console.print(f"  Probing auth flows for [bold]{email}[/]...")
+            result = auto_auth(
+                app_cfg.client_id, app_cfg.region, email, timeout, prompt_fn=_prompt
+            )
+            id_token = result.id_token
+            console.print(f"  Flow used: [dim]{result.flow_used}[/]")
+        elif auth_flow == "otp":
+            console.print(f"  Triggering OTP to [bold]{email}[/]...")
             session = initiate_otp_auth(app_cfg.client_id, app_cfg.region, email, timeout)
-        except Exception as exc:
-            console.print(f"  [red]InitiateAuth failed: {exc}[/]")
-            raise SystemExit(1)
-        console.print("  OTP sent. Check your inbox.")
-        otp = click.prompt("  Enter OTP")
-        try:
+            console.print("  OTP sent. Check your inbox.")
+            otp = click.prompt("  Enter OTP")
             id_token = complete_otp_auth(
                 app_cfg.client_id, app_cfg.region, email, session, otp, timeout
             )
-        except Exception as exc:
-            console.print(f"  [red]OTP exchange failed: {exc}[/]")
-            raise SystemExit(1)
-    else:
-        password = click.prompt("  Password", hide_input=True)
-        try:
+        else:  # password
+            password = click.prompt("  Password", hide_input=True)
             id_token = password_auth(
                 app_cfg.client_id, app_cfg.region, email, password, timeout
             )
-        except Exception as exc:
-            console.print(f"  [red]Password auth failed: {exc}[/]")
-            raise SystemExit(1)
+    except Exception as exc:
+        console.print(f"  [red]Auth failed: {exc}[/]")
+        raise SystemExit(1)
 
     console.print("  [green]Authenticated — IdToken acquired[/]")
 

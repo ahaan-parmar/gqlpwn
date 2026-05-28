@@ -128,6 +128,10 @@ def scrape_app_config(
 
 # ── Cognito API helpers ────────────────────────────────────────────────────
 
+class CognitoFlowDisabled(RuntimeError):
+    """Raised when a Cognito auth flow is not enabled on the app client."""
+
+
 def _cognito_post(region: str, target: str, body: dict, timeout: int) -> dict:
     url = f"https://cognito-idp.{region}.amazonaws.com/"
     with httpx.Client(timeout=timeout) as client:
@@ -141,7 +145,13 @@ def _cognito_post(region: str, target: str, body: dict, timeout: int) -> dict:
         )
         data = resp.json()
         if resp.status_code != 200:
+            error_type = data.get("__type", "")
             msg = data.get("message") or data.get("Message") or str(data)
+            # Pool client doesn't have this flow enabled
+            if error_type in ("UnknownOperationException", "NotAuthorizedException") and (
+                "flow" in msg.lower() or error_type == "UnknownOperationException"
+            ):
+                raise CognitoFlowDisabled(f"{body.get('AuthFlow', target)} not enabled: {msg}")
             raise RuntimeError(f"Cognito {target} → {resp.status_code}: {msg}")
         return data
 
@@ -227,5 +237,61 @@ def password_auth(
         )
     id_token = auth.get("IdToken")
     if not id_token:
-        raise RuntimeError("No IdToken in AuthenticationResult.")
+        raise RuntimeError("No IdToken in AuthenticationResult (password flow).")
     return id_token
+
+
+# ── Auto-detect flow ───────────────────────────────────────────────────────
+
+class AuthResult:
+    """Returned by auto_auth with the IdToken and which flow succeeded."""
+    def __init__(self, id_token: str, flow_used: str) -> None:
+        self.id_token = id_token
+        self.flow_used = flow_used
+
+
+def auto_auth(
+    client_id: str,
+    region: str,
+    email: str,
+    timeout: int = 30,
+    prompt_fn: "Callable[[str], str] | None" = None,
+) -> AuthResult:
+    """
+    Try Cognito auth flows in order, prompting for credentials as needed.
+
+    Order:
+      1. CUSTOM_AUTH (OTP) — prompt for OTP after triggering it
+      2. USER_PASSWORD_AUTH — prompt for password
+      3. Raise with clear message listing what was tried
+
+    prompt_fn(message) -> str is called to get user input (OTP or password).
+    Defaults to input() if not provided.
+    """
+    from typing import Callable  # noqa: F401 — used in type annotation above
+
+    ask = prompt_fn if prompt_fn is not None else input
+
+    # ── Try CUSTOM_AUTH (OTP) ────────────────────────────────────────────
+    try:
+        session = initiate_otp_auth(client_id, region, email, timeout)
+        otp = ask("Enter OTP (sent to your email): ")
+        id_token = complete_otp_auth(client_id, region, email, session, otp, timeout)
+        return AuthResult(id_token=id_token, flow_used="CUSTOM_AUTH (OTP)")
+    except CognitoFlowDisabled:
+        pass  # flow not enabled on this pool client
+
+    # ── Try USER_PASSWORD_AUTH ───────────────────────────────────────────
+    try:
+        password = ask("Password: ")
+        id_token = password_auth(client_id, region, email, password, timeout)
+        return AuthResult(id_token=id_token, flow_used="USER_PASSWORD_AUTH")
+    except CognitoFlowDisabled:
+        pass
+
+    raise RuntimeError(
+        "Neither CUSTOM_AUTH nor USER_PASSWORD_AUTH is enabled on this Cognito app client.\n"
+        "The pool likely uses USER_SRP_AUTH (SRP is not supported by fullpwn).\n"
+        "Workaround: log in via the browser, copy the IdToken from DevTools, "
+        "and run: gqlpwn autopwn <endpoint> -t <token>"
+    )
