@@ -29,6 +29,11 @@ _SENSITIVE_PATTERNS = [
     re.compile(r'"ssn|pan|aadhar|passport"', re.I),
     re.compile(r'"credit_card|card_number"', re.I),
     re.compile(r'"salary|billing|invoice|amount"', re.I),
+    # AWS credentials
+    re.compile(r'AKIA[A-Z0-9]{16}'),
+    re.compile(r'"access_key_id"\s*:\s*"[^"]{16,}"', re.I),
+    re.compile(r'"secret_access_key"\s*:\s*"[^"]{16,}"', re.I),
+    re.compile(r'"mqtt[_\s]password"', re.I),
 ]
 
 _AUTH_ERROR_HINTS = [
@@ -208,15 +213,33 @@ class Enumerator:
         if t in ("Int", "Float"):
             return "1"
 
-        # Enum — skip (optional handling)
-        if t.startswith("enum") or t[0].isupper():
-            return None
+        # Input object type — emit an empty object so the resolver at least runs.
+        # Fields like get_particular_user_details(input: UserInput) will get {}.
+        # This is intentionally minimal: it lets us probe whether auth is enforced
+        # even when we can't fully construct the payload.
+        if t[0].isupper():
+            return self._build_input_object(t)
 
-        # Generic string
+        # Generic string / ID
         if t in ("String", "ID", "AWSJSON", "AWSEmail"):
             return '"test"'
 
         return None
+
+    def _build_input_object(self, type_name: str) -> str:
+        """
+        Build a best-effort value for a named input type.
+        Tries common field names based on the type name; falls back to {}.
+        """
+        name_lower = type_name.lower()
+        # Email-based lookups (e.g. UserInput, GetUserInput)
+        if "email" in name_lower or "user" in name_lower:
+            return '{user_email_id: "test@test.com", email: "test@test.com"}'
+        if "org" in name_lower:
+            org = f'"{self.org_id}"' if self.org_id else '"test-org-id"'
+            return f'{{organization_id: {org}}}'
+        # Generic — empty object lets resolver run and reveal auth errors
+        return "{}"
 
     @staticmethod
     def _has_real_data(body: str, field_name: str) -> bool:

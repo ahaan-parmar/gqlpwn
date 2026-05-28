@@ -300,11 +300,55 @@ async def _autopwn_pipeline(
                 console.print(f"    [red]{r.field_name}[/] -- {', '.join(r.sensitive_matches)}")
                 console.print(f"    [dim]{r.response_body[:200]}[/]\n")
 
+        # Convert sensitive enum findings → Finding objects (collected here, added after
+        # result is created in Phase 4, because info_disclosure has no access to enum_report).
+        import re as _re
+        _AWS_KEY_PAT = _re.compile(r'(AKIA[A-Z0-9]{16})')
+        _MQTT_CRED_PAT = _re.compile(r'"password"\s*:\s*"([^"]{4,})"')
+        from gqlpwn.utils.models import Finding as _Finding
+        _enum_findings: list[_Finding] = []
+        for qr in enum_report.sensitive_findings:
+            severity = "high"
+            extra_evidence = ""
+            if _AWS_KEY_PAT.search(qr.response_body):
+                severity = "critical"
+                key_match = _AWS_KEY_PAT.search(qr.response_body)
+                extra_evidence = f" AWS key detected: {key_match.group(1)}."
+            elif "mqtt" in qr.response_body.lower() and _MQTT_CRED_PAT.search(qr.response_body):
+                severity = "critical"
+                extra_evidence = " MQTT plaintext credentials found."
+            _enum_findings.append(_Finding(
+                module="info_disclosure",
+                title=f"Sensitive Data Exposure — {qr.field_name}",
+                severity=severity,
+                description=(
+                    f"The operation '{qr.field_name}' returns sensitive data without "
+                    f"additional privilege checks. Matched: {', '.join(qr.sensitive_matches)}."
+                ),
+                endpoint=url,
+                evidence=f"{extra_evidence} Preview: {qr.response_body[:600]}",
+                remediation=(
+                    "Apply field-level authorization. Remove credentials and secrets "
+                    "from API responses entirely."
+                ),
+            ))
+
+        # Extract org_id from enum responses if Phase 2 missed it.
+        if not ctx_info.org_id:
+            _ORG_PAT = _re.compile(r'"organization_id"\s*:\s*"([a-f0-9\-]{36})"')
+            for qr in list(enum_report.accessible_queries) + list(enum_report.accessible_mutations):
+                m = _ORG_PAT.search(qr.response_body)
+                if m:
+                    ctx_info.org_id = m.group(1)
+                    console.print(f"  [dim]org_id extracted from {qr.field_name}: {ctx_info.org_id}[/]")
+                    break
+
         # ── Phase 4: Tenant Isolation ────────────────────────────────
         console.print(Rule("[bold cyan]Phase 4 -- Tenant Isolation (BOLA)[/]"))
         result = ScanResult(target=url)
         result.gql_schema = schema
         result.introspection_enabled = intro_result.enabled
+        result.findings.extend(_enum_findings)  # enum sensitive findings captured in Phase 3
         run_ctx = RunContext(config=config, result=result, requester=req)
 
         if ctx_info.org_id:
@@ -383,7 +427,7 @@ async def _autopwn_pipeline(
 @click.option("-x", "--proxy",     default=None,   help="HTTP proxy")
 @click.option("--timeout",         default=30,     type=int)
 @click.option("--workers",         default=5,      type=int)
-@click.option("--mutations",       is_flag=True,   help="Also enumerate mutations")
+@click.option("--mutations/--no-mutations", default=True, help="Enumerate mutations (default: on)")
 @click.option("--aggressive",      is_flag=True,   help="Enable DoS module")
 @click.option("-o", "--output",    default="autopwn_report.html", help="Output report path")
 @click.option("-f", "--format",    default="html", type=click.Choice(["html", "json", "markdown"]))
