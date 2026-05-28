@@ -203,6 +203,179 @@ def introspect(
 # autopwn command
 # ---------------------------------------------------------------------------
 
+async def _autopwn_pipeline(
+    url: str,
+    token: str,
+    proxy: str | None,
+    timeout: int,
+    workers: int,
+    mutations: bool,
+    aggressive: bool,
+    output: str,
+    fmt: str,
+    extra_headers: dict | None = None,
+) -> None:
+    """Shared autopwn pipeline used by both `autopwn` and `fullpwn` commands."""
+    import json as _json
+    from rich.rule import Rule
+    from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn
+
+    from gqlpwn.core.context_discoverer import ContextDiscoverer
+    from gqlpwn.core.enumerator import Enumerator
+    from gqlpwn.core.introspector import Introspector
+    from gqlpwn.core.parser import SchemaParser
+    from gqlpwn.core.requester import Requester
+    from gqlpwn.core.scanner import Scanner, _resolve_modules
+    from gqlpwn.core.scorer import assign_scores
+    from gqlpwn.modules.tenant_isolation import TenantIsolationModule
+    from gqlpwn.output.reporter import Reporter
+    from gqlpwn.utils.models import RunContext, ScanConfig, ScanResult
+
+    config = ScanConfig(
+        url=url,
+        headers={"Authorization": token, **(extra_headers or {})},
+        proxy=proxy,
+        timeout=timeout,
+        concurrency=workers,
+        aggressive=aggressive,
+    )
+
+    async with Requester(config) as req:
+
+        # ── Phase 1: Schema ──────────────────────────────────────────
+        console.print(Rule("[bold cyan]Phase 1 -- Schema Discovery[/]"))
+        with console.status("Pulling schema..."):
+            intro = Introspector(req)
+            intro_result = await intro.run()
+        schema = SchemaParser().parse(intro_result.raw)
+        console.print(
+            f"  Introspection : [bold]{'enabled' if intro_result.enabled else 'DISABLED'}[/]"
+        )
+        console.print(f"  Queries       : [bold]{len(schema.queries)}[/]")
+        console.print(f"  Mutations     : [bold]{len(schema.mutations)}[/]")
+        console.print(f"  Types         : [bold]{len(schema.types)}[/]")
+
+        # ── Phase 2: Context Discovery ───────────────────────────────
+        console.print(Rule("[bold cyan]Phase 2 -- Context Discovery[/]"))
+        with Progress(
+            SpinnerColumn(),
+            TextColumn("[progress.description]{task.description}"),
+            BarColumn(),
+            MofNCompleteColumn(),
+            console=console,
+            transient=True,
+        ) as progress:
+            probe_task = progress.add_task("Probing queries for user/org context...", total=None)
+
+            def _on_probe(probed: int, total: int) -> None:
+                progress.update(probe_task, completed=probed, total=total)
+
+            discoverer = ContextDiscoverer(req, token, on_probe=_on_probe)
+            ctx_info = await discoverer.discover(schema)
+
+        console.print(ctx_info.summary())
+        if ctx_info.discovery_log:
+            for entry in ctx_info.discovery_log:
+                console.print(f"  [dim]>> {entry}[/]")
+
+        # ── Phase 3: Enumeration ─────────────────────────────────────
+        console.print(Rule("[bold cyan]Phase 3 -- Operation Enumeration[/]"))
+        enumerator = Enumerator(req, org_id=ctx_info.org_id, concurrency=workers)
+        mut_list = schema.mutations if mutations else []
+
+        with console.status(
+            f"Firing {len(schema.queries)} queries"
+            + (f" + {len(mut_list)} mutations" if mutations else "") + "..."
+        ):
+            enum_report = await enumerator.run_all(schema.queries, mut_list, url)
+
+        console.print(f"  Accessible queries   : [green]{len(enum_report.accessible_queries)}[/]")
+        console.print(f"  Accessible mutations : [green]{len(enum_report.accessible_mutations)}[/]")
+        console.print(f"  Sensitive responses  : [red]{len(enum_report.sensitive_findings)}[/]")
+        console.print(f"  Auth-blocked         : [dim]{len(enum_report.auth_blocked)}[/]")
+
+        if enum_report.sensitive_findings:
+            console.print("\n  [bold red]Sensitive data detected in:[/]")
+            for r in enum_report.sensitive_findings:
+                console.print(f"    [red]{r.field_name}[/] -- {', '.join(r.sensitive_matches)}")
+                console.print(f"    [dim]{r.response_body[:200]}[/]\n")
+
+        # ── Phase 4: Tenant Isolation ────────────────────────────────
+        console.print(Rule("[bold cyan]Phase 4 -- Tenant Isolation (BOLA)[/]"))
+        result = ScanResult(target=url)
+        result.gql_schema = schema
+        result.introspection_enabled = intro_result.enabled
+        run_ctx = RunContext(config=config, result=result, requester=req)
+
+        if ctx_info.org_id:
+            console.print(f"  Own org_id: [cyan]{ctx_info.org_id}[/]")
+            with console.status("Testing cross-tenant access..."):
+                iso_mod = TenantIsolationModule(own_org_id=ctx_info.org_id)
+                iso_findings = await iso_mod.run(run_ctx)
+            if iso_findings:
+                console.print(f"  [bold red]CRITICAL: {len(iso_findings)} tenant isolation failure(s)[/]")
+                for f in iso_findings:
+                    console.print(f"    [red]{f.title}[/]")
+            else:
+                console.print("  [green]No cross-tenant access confirmed[/]")
+            result.findings.extend(iso_findings)
+        else:
+            console.print("  [yellow]org_id not discovered -- skipping tenant isolation[/]")
+
+        # ── Phase 5: Vulnerability Scan ──────────────────────────────
+        console.print(Rule("[bold cyan]Phase 5 -- Vulnerability Modules[/]"))
+        vuln_config = config.model_copy(update={
+            "modules": ["info_disclosure", "injection", "bola", "auth", "ssrf"]
+            + (["dos"] if aggressive else []),
+            "aggressive": aggressive,
+        })
+        mods = _resolve_modules(vuln_config.modules, aggressive)
+
+        module_findings = []
+        for mod in mods:
+            try:
+                mf = await mod.run(run_ctx)
+                module_findings.extend(mf)
+                if mf:
+                    console.print(f"  [yellow]{mod.name}[/]: {len(mf)} finding(s)")
+            except Exception as exc:
+                console.print(f"  [red]{mod.name} error: {exc}[/]")
+
+        result.findings.extend(module_findings)
+        result.findings = assign_scores(result.findings)
+        result.modules_run = [m.name for m in mods] + (
+            ["tenant_isolation"] if ctx_info.org_id else []
+        )
+
+        # ── Phase 6: Report ──────────────────────────────────────────
+        console.print(Rule("[bold cyan]Phase 6 -- Report[/]"))
+        reporter = Reporter(result)
+        reporter.write(output, fmt)  # type: ignore[arg-type]
+        console.print(f"  Report : [green]{output}[/]")
+
+        enum_out = output.rsplit(".", 1)[0] + "_enum.json"
+        enum_data = {
+            "user_context": {
+                "user_id": ctx_info.user_id,
+                "email": ctx_info.email,
+                "org_id": ctx_info.org_id,
+                "role": ctx_info.role,
+                "jwt_claims": ctx_info.raw_claims,
+            },
+            "accessible_queries": [
+                {"field": r.field_name, "sensitive": bool(r.sensitive_matches),
+                 "patterns": r.sensitive_matches, "preview": r.response_body[:400]}
+                for r in enum_report.accessible_queries
+            ],
+            "sensitive_fields": [r.field_name for r in enum_report.sensitive_findings],
+            "auth_blocked": enum_report.auth_blocked,
+            "total_findings": len(result.findings),
+        }
+        Path(enum_out).write_text(_json.dumps(enum_data, indent=2), encoding="utf-8")
+        console.print(f"  Enum   : [green]{enum_out}[/]")
+        console.print(f"\n  Total findings: [bold]{len(result.findings)}[/]")
+
+
 @cli.command()
 @click.argument("url")
 @click.option("-t", "--token",     required=True,  help="Bearer token (IdToken for Cognito/AppSync)")
@@ -236,175 +409,123 @@ def autopwn(
     _print_banner()
     configure_logging(verbose)
 
-    import json as _json
+    token = "".join(token.split())
+    asyncio.run(_autopwn_pipeline(
+        url, token, proxy, timeout, workers, mutations, aggressive, output, format,
+        extra_headers=parse_headers(header),
+    ))
+
+
+# ---------------------------------------------------------------------------
+# fullpwn command
+# ---------------------------------------------------------------------------
+
+@cli.command()
+@click.argument("website_url")
+@click.option("--email",        required=True,  help="Account email — OTP will be sent here")
+@click.option("--auth-flow",    default="otp",  type=click.Choice(["otp", "password"]),
+              help="Auth flow: 'otp' (Cognito CUSTOM_AUTH) or 'password' (USER_PASSWORD_AUTH)")
+@click.option("--endpoint",     default=None,   help="Override AppSync GraphQL endpoint (skip scraping)")
+@click.option("--pool-id",      default=None,   help="Override Cognito User Pool ID (skip scraping)")
+@click.option("--client-id",    default=None,   help="Override Cognito Client ID (skip scraping)")
+@click.option("-x", "--proxy",  default=None,   help="HTTP proxy")
+@click.option("--timeout",      default=30,     type=int)
+@click.option("--workers",      default=5,      type=int)
+@click.option("--mutations",    is_flag=True,   help="Also enumerate mutations")
+@click.option("--aggressive",   is_flag=True,   help="Enable DoS module")
+@click.option("-o", "--output", default="fullpwn_report.html", help="Output report path")
+@click.option("-f", "--format", default="html", type=click.Choice(["html", "json", "markdown"]))
+@click.option("-v", "--verbose",is_flag=True)
+def fullpwn(
+    website_url: str,
+    email: str,
+    auth_flow: str,
+    endpoint: str | None,
+    pool_id: str | None,
+    client_id: str | None,
+    proxy: str | None,
+    timeout: int,
+    workers: int,
+    mutations: bool,
+    aggressive: bool,
+    output: str,
+    format: str,
+    verbose: bool,
+) -> None:
+    """
+    Zero-to-pwn from just a website URL and email.
+
+    Scrapes JS bundles for AppSync endpoint + Cognito config, triggers OTP
+    (or prompts for password), exchanges for IdToken, then runs full autopwn.
+    """
+    _print_banner()
+    configure_logging(verbose)
+
     from rich.rule import Rule
-
-    from gqlpwn.core.context_discoverer import ContextDiscoverer
-    from gqlpwn.core.enumerator import Enumerator
-    from gqlpwn.core.introspector import Introspector
-    from gqlpwn.core.parser import SchemaParser
-    from gqlpwn.core.requester import Requester
-    from gqlpwn.core.scanner import Scanner
-    from gqlpwn.core.scorer import assign_scores
-    from gqlpwn.modules.tenant_isolation import TenantIsolationModule
-    from gqlpwn.output.reporter import Reporter
-    from gqlpwn.utils.models import RunContext, ScanConfig, ScanResult
-
-    extra_headers = parse_headers(header)
-    token = "".join(token.split())  # strip all whitespace/newlines baked in from shell paste
-    config = ScanConfig(
-        url=url,
-        headers={"Authorization": token, **extra_headers},
-        proxy=proxy,
-        timeout=timeout,
-        concurrency=workers,
-        verbose=verbose,
-        aggressive=aggressive,
+    from gqlpwn.core.cognito_auth import (
+        complete_otp_auth,
+        initiate_otp_auth,
+        password_auth,
+        scrape_app_config,
     )
 
-    async def _run() -> None:
-        async with Requester(config) as req:
-
-            # ── Phase 1: Schema ──────────────────────────────────────────
-            console.print(Rule("[bold cyan]Phase 1 -- Schema Discovery[/]"))
-            with console.status("Pulling schema..."):
-                intro = Introspector(req)
-                intro_result = await intro.run()
-            schema = SchemaParser().parse(intro_result.raw)
-            console.print(
-                f"  Introspection : [bold]{'enabled' if intro_result.enabled else 'DISABLED'}[/]"
+    # ── Step 1: Scrape JS bundles ────────────────────────────────────────
+    console.print(Rule("[bold cyan]Step 1 -- Scraping JS bundles[/]"))
+    with console.status(f"Fetching {website_url} and scanning JS bundles..."):
+        try:
+            app_cfg = scrape_app_config(
+                website_url,
+                timeout=timeout,
+                endpoint_override=endpoint,
+                pool_id_override=pool_id,
+                client_id_override=client_id,
             )
-            console.print(f"  Queries       : [bold]{len(schema.queries)}[/]")
-            console.print(f"  Mutations     : [bold]{len(schema.mutations)}[/]")
-            console.print(f"  Types         : [bold]{len(schema.types)}[/]")
+        except Exception as exc:
+            console.print(f"  [red]Scrape failed: {exc}[/]")
+            raise SystemExit(1)
 
-            # ── Phase 2: Context Discovery ───────────────────────────────
-            console.print(Rule("[bold cyan]Phase 2 -- Context Discovery[/]"))
-            from rich.progress import BarColumn, MofNCompleteColumn, Progress, SpinnerColumn, TextColumn
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                MofNCompleteColumn(),
-                console=console,
-                transient=True,
-            ) as progress:
-                probe_task = progress.add_task("Probing queries for user/org context...", total=None)
+    console.print(f"  GraphQL endpoint : [cyan]{app_cfg.graphql_endpoint}[/]")
+    console.print(f"  Cognito pool     : [dim]{app_cfg.user_pool_id}[/]")
+    console.print(f"  Client ID        : [dim]{app_cfg.client_id}[/]")
+    console.print(f"  Region           : [dim]{app_cfg.region}[/]")
 
-                def _on_probe(probed: int, total: int) -> None:
-                    progress.update(probe_task, completed=probed, total=total)
+    # ── Step 2: Authenticate ─────────────────────────────────────────────
+    console.print(Rule("[bold cyan]Step 2 -- Cognito Authentication[/]"))
+    id_token: str
 
-                discoverer = ContextDiscoverer(req, token, on_probe=_on_probe)
-                ctx_info = await discoverer.discover(schema)
-
-            console.print(ctx_info.summary())
-            if ctx_info.discovery_log:
-                for entry in ctx_info.discovery_log:
-                    console.print(f"  [dim]>> {entry}[/]")
-
-            # ── Phase 3: Enumeration ─────────────────────────────────────
-            console.print(Rule("[bold cyan]Phase 3 -- Operation Enumeration[/]"))
-            enumerator = Enumerator(req, org_id=ctx_info.org_id, concurrency=workers)
-            mut_list = schema.mutations if mutations else []
-
-            with console.status(
-                f"Firing {len(schema.queries)} queries"
-                + (f" + {len(mut_list)} mutations" if mutations else "") + "..."
-            ):
-                enum_report = await enumerator.run_all(schema.queries, mut_list, url)
-
-            console.print(f"  Accessible queries   : [green]{len(enum_report.accessible_queries)}[/]")
-            console.print(f"  Accessible mutations : [green]{len(enum_report.accessible_mutations)}[/]")
-            console.print(f"  Sensitive responses  : [red]{len(enum_report.sensitive_findings)}[/]")
-            console.print(f"  Auth-blocked         : [dim]{len(enum_report.auth_blocked)}[/]")
-
-            if enum_report.sensitive_findings:
-                console.print("\n  [bold red]Sensitive data detected in:[/]")
-                for r in enum_report.sensitive_findings:
-                    console.print(f"    [red]{r.field_name}[/] -- {', '.join(r.sensitive_matches)}")
-                    console.print(f"    [dim]{r.response_body[:200]}[/]\n")
-
-            # ── Phase 4: Tenant Isolation ────────────────────────────────
-            console.print(Rule("[bold cyan]Phase 4 -- Tenant Isolation (BOLA)[/]"))
-            result = ScanResult(target=url)
-            result.gql_schema = schema
-            result.introspection_enabled = intro_result.enabled
-            run_ctx = RunContext(config=config, result=result, requester=req)
-
-            if ctx_info.org_id:
-                console.print(f"  Own org_id: [cyan]{ctx_info.org_id}[/]")
-                with console.status("Testing cross-tenant access..."):
-                    iso_mod = TenantIsolationModule(own_org_id=ctx_info.org_id)
-                    iso_findings = await iso_mod.run(run_ctx)
-                if iso_findings:
-                    console.print(f"  [bold red]CRITICAL: {len(iso_findings)} tenant isolation failure(s)[/]")
-                    for f in iso_findings:
-                        console.print(f"    [red]{f.title}[/]")
-                else:
-                    console.print("  [green]No cross-tenant access confirmed[/]")
-                result.findings.extend(iso_findings)
-            else:
-                console.print("  [yellow]org_id not discovered -- skipping tenant isolation[/]")
-
-            # ── Phase 5: Vulnerability Scan ──────────────────────────────
-            console.print(Rule("[bold cyan]Phase 5 -- Vulnerability Modules[/]"))
-            vuln_config = config.model_copy(update={
-                "modules": ["info_disclosure", "injection", "bola", "auth", "ssrf"]
-                + (["dos"] if aggressive else []),
-                "aggressive": aggressive,
-            })
-            scanner = Scanner(vuln_config)
-            # Run modules only (skip re-introspection by reusing schema)
-            from gqlpwn.core.scanner import _resolve_modules
-            modules = _resolve_modules(vuln_config.modules, aggressive)
-            from gqlpwn.core.scorer import assign_scores as _score
-
-            module_findings = []
-            for mod in modules:
-                try:
-                    mf = await mod.run(run_ctx)
-                    module_findings.extend(mf)
-                    if mf:
-                        console.print(f"  [yellow]{mod.name}[/]: {len(mf)} finding(s)")
-                except Exception as exc:
-                    console.print(f"  [red]{mod.name} error: {exc}[/]")
-
-            result.findings.extend(module_findings)
-            result.findings = assign_scores(result.findings)
-            result.modules_run = [m.name for m in modules] + (
-                ["tenant_isolation"] if ctx_info.org_id else []
+    if auth_flow == "otp":
+        console.print(f"  Triggering OTP to [bold]{email}[/]...")
+        try:
+            session = initiate_otp_auth(app_cfg.client_id, app_cfg.region, email, timeout)
+        except Exception as exc:
+            console.print(f"  [red]InitiateAuth failed: {exc}[/]")
+            raise SystemExit(1)
+        console.print("  OTP sent. Check your inbox.")
+        otp = click.prompt("  Enter OTP")
+        try:
+            id_token = complete_otp_auth(
+                app_cfg.client_id, app_cfg.region, email, session, otp, timeout
             )
+        except Exception as exc:
+            console.print(f"  [red]OTP exchange failed: {exc}[/]")
+            raise SystemExit(1)
+    else:
+        password = click.prompt("  Password", hide_input=True)
+        try:
+            id_token = password_auth(
+                app_cfg.client_id, app_cfg.region, email, password, timeout
+            )
+        except Exception as exc:
+            console.print(f"  [red]Password auth failed: {exc}[/]")
+            raise SystemExit(1)
 
-            # ── Phase 6: Report ──────────────────────────────────────────
-            console.print(Rule("[bold cyan]Phase 6 -- Report[/]"))
-            reporter = Reporter(result)
-            reporter.write(output, format)  # type: ignore[arg-type]
-            console.print(f"  Report : [green]{output}[/]")
+    console.print("  [green]Authenticated — IdToken acquired[/]")
 
-            # Also dump enum results
-            enum_out = output.rsplit(".", 1)[0] + "_enum.json"
-            enum_data = {
-                "user_context": {
-                    "user_id": ctx_info.user_id,
-                    "email": ctx_info.email,
-                    "org_id": ctx_info.org_id,
-                    "role": ctx_info.role,
-                    "jwt_claims": ctx_info.raw_claims,
-                },
-                "accessible_queries": [
-                    {"field": r.field_name, "sensitive": bool(r.sensitive_matches),
-                     "patterns": r.sensitive_matches, "preview": r.response_body[:400]}
-                    for r in enum_report.accessible_queries
-                ],
-                "sensitive_fields": [r.field_name for r in enum_report.sensitive_findings],
-                "auth_blocked": enum_report.auth_blocked,
-                "total_findings": len(result.findings),
-            }
-            Path(enum_out).write_text(_json.dumps(enum_data, indent=2), encoding="utf-8")
-            console.print(f"  Enum   : [green]{enum_out}[/]")
-            console.print(f"\n  Total findings: [bold]{len(result.findings)}[/]")
-
-    asyncio.run(_run())
+    # ── Steps 3–8: Full autopwn pipeline ────────────────────────────────
+    asyncio.run(_autopwn_pipeline(
+        app_cfg.graphql_endpoint, id_token, proxy, timeout, workers,
+        mutations, aggressive, output, format,
+    ))
 
 
 # ---------------------------------------------------------------------------
